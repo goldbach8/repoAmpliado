@@ -890,9 +890,24 @@ with tab_proceso:
                 df['qty_comprar_polifiltro'] = np.where(cond_a, qty_poli_a,
                                                np.where(cond_b, qty_poli_b, qty_poli_c))
 
-                # Redondear a enteros
-                df['qty_comprar_mexico'] = df['qty_comprar_mexico'].round(0).astype(int)
-                df['qty_comprar_polifiltro'] = df['qty_comprar_polifiltro'].round(0).astype(int)
+                # ── 9. Redondeo al tamaño de caja (ceiling al múltiplo de qty_piezas_por_caja) ──
+                # Si qty_piezas_por_caja <= 0 o es NaN, se trata como caja de 1 (sin efecto).
+                # Fórmula: ceil(qty / caja) * caja  →  garantiza comprar cajas completas.
+                caja = df['qty_piezas_por_caja'].fillna(1).clip(lower=1)
+
+                def redondear_caja(qty_serie, caja_serie):
+                    """Redondea cada cantidad hacia arriba al múltiplo de caja más cercano.
+                    Si la cantidad es 0, devuelve 0 (no se genera pedido)."""
+                    qty = qty_serie.clip(lower=0)
+                    redondeado = np.where(
+                        qty > 0,
+                        np.ceil(qty / caja_serie) * caja_serie,
+                        0
+                    )
+                    return redondeado.astype(int)
+
+                df['qty_comprar_mexico']     = redondear_caja(df['qty_comprar_mexico'],     caja)
+                df['qty_comprar_polifiltro'] = redondear_caja(df['qty_comprar_polifiltro'], caja)
 
                 st.session_state['resultado'] = df
 
