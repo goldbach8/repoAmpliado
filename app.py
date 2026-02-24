@@ -872,6 +872,7 @@ with tab_proceso:
                 so = df['stock_objetivo']
                 sv = df['stock_virtual']
                 rp = df['reserv_polifiltro']
+                bop = df ['bo_polifiltro']
 
                 # Caso A: todo México
                 qty_mex_a = (so - sv).clip(lower=0)
@@ -879,11 +880,11 @@ with tab_proceso:
 
                 # Caso B: 5/8 en México, resto en Poli
                 qty_mex_b  = (((5 * so) / 8) - sv).clip(lower=0)
-                qty_poli_b = (so - sv - qty_mex_b - rp).clip(lower=0)
+                qty_poli_b = (so - sv - qty_mex_b - rp - bop).clip(lower=0)
 
                 # Caso C: 4/7 en México, resto en Poli
                 qty_mex_c  = (((4 * so) / 7) - sv).clip(lower=0)
-                qty_poli_c = (so - sv - qty_mex_c - rp).clip(lower=0)
+                qty_poli_c = (so - sv - qty_mex_c - rp - bop).clip(lower=0)
 
                 df['qty_comprar_mexico'] = np.where(cond_a, qty_mex_a,
                                             np.where(cond_b, qty_mex_b, qty_mex_c))
