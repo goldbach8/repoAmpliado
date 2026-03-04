@@ -35,7 +35,7 @@ st.markdown("""
     --accent: #f5b800;
     --accent2: #60cfff;
     --text: #f0f2fa;
-    --muted: #9ea3bc;
+    --muted: #f0f2fa;
     --success: #5cce8f;
     --error: #f07878;
     --warning: #f5c842;
@@ -836,60 +836,104 @@ with tab_proceso:
                     df['bo_mexico']
                 )
 
-                # ── 6. Diferencia de precio y donde comprar ──
+                # ── 6. Diferencia de precio (Polifiltro vs México) ──
+                # Valor negativo = Polifiltro más barato. Ej: -10 significa 10% más barato.
                 df['diferencia_precio_pct'] = np.where(
                     df['pc'] > 0,
                     (df['precio_polifiltro'] - df['pc']) / df['pc'] * 100,
                     np.nan
                 )
+
+                # Clasificación del tramo de precio para decidir dónde y cuánto comprar:
+                #   'POLI_FUERTE' : Polifiltro >= 8% más barato  → proporciones máximas en Poli
+                #   'POLI_LEVE'   : Polifiltro entre 5.5% y 8% más barato → proporciones intermedias
+                #   'MEX'         : diferencia < 5.5%  → todo México
+                tiene_precio_poli = df['precio_polifiltro'] > 0
+                diff = df['diferencia_precio_pct']
+
                 df['donde_comprar'] = np.where(
-                    (df['precio_polifiltro'] > 0) & (df['diferencia_precio_pct'] < -5),
-                    'POLI',
-                    'MEX'
-                )
+                    tiene_precio_poli & (diff <= -8.0),   'POLI_FUERTE',
+                    np.where(
+                    tiene_precio_poli & (diff <= -5.5),   'POLI_LEVE',
+                                                          'MEX'
+                ))
 
-                # ── 7. Stock objetivo y proporciones ──
+                # ── 7. Stock objetivo, casos y proporciones ──
+                # Calificaciones premium (mayor rotación / criticidad)
                 cal_aa = df['clasificacion'].str.upper().isin(['AA', 'AB', 'AC', 'BA'])
-
-                cond_a = df['donde_comprar'] == 'MEX'
-                cond_b = cal_aa & (df['donde_comprar'] == 'POLI')
-                cond_c = ~cond_a & ~cond_b  # resto
 
                 dms = df['demanda_mensual_sin_contratos']
                 dmc = df['demanda_mensual_contratos']
 
-                df['stock_objetivo'] = np.where(
-                    cond_a, 6*dms + 4*dmc,
-                    np.where(cond_b, 8*dms + 4*dmc,
-                             7*dms + 4*dmc)
+                # ┌──────────────┬──────────────────┬───────────────────────────────────────┐
+                # │ Caso         │ Condición        │ Stock objetivo / Proporción           │
+                # ├──────────────┼──────────────────┼───────────────────────────────────────┤
+                # │ A  (MEX)     │ donde_comprar=MEX│ 6×dms + 4×dmc  |  6x0                │
+                # │ B1 (POLI AA) │ POLI_FUERTE + AA │ 8×dms + 4×dmc  |  5x3                │
+                # │ B2 (POLI)    │ POLI_FUERTE      │ 7×dms + 4×dmc  |  4x3                │
+                # │ C1 (POLI AA) │ POLI_LEVE + AA   │ 8×dms + 4×dmc  |  6x2                │
+                # │ C2 (POLI)    │ POLI_LEVE        │ 7×dms + 4×dmc  |  5x2                │
+                # └──────────────┴──────────────────┴───────────────────────────────────────┘
+                cond_a  = df['donde_comprar'] == 'MEX'
+                cond_b1 = (df['donde_comprar'] == 'POLI_FUERTE') &  cal_aa
+                cond_b2 = (df['donde_comprar'] == 'POLI_FUERTE') & ~cal_aa
+                cond_c1 = (df['donde_comprar'] == 'POLI_LEVE')   &  cal_aa
+                cond_c2 = (df['donde_comprar'] == 'POLI_LEVE')   & ~cal_aa
+
+                df['stock_objetivo'] = np.select(
+                    [cond_a,        cond_b1,         cond_b2,         cond_c1,         cond_c2],
+                    [6*dms+4*dmc,   8*dms+4*dmc,     7*dms+4*dmc,     8*dms+4*dmc,     7*dms+4*dmc],
+                    default=6*dms+4*dmc
                 )
 
-                df['caso'] = np.where(cond_a, 'A', np.where(cond_b, 'B', 'C'))
+                df['caso'] = np.select(
+                    [cond_a, cond_b1, cond_b2, cond_c1, cond_c2],
+                    ['A',    'B1',    'B2',    'C1',    'C2'],
+                    default='A'
+                )
 
-                df['proporcion'] = np.where(cond_a, '6x0', np.where(cond_b, '5x3', '4x3'))
+                df['proporcion'] = np.select(
+                    [cond_a, cond_b1, cond_b2, cond_c1, cond_c2],
+                    ['6x0',  '5x3',   '4x3',   '6x2',   '5x2'],
+                    default='6x0'
+                )
 
                 # ── 8. Cantidades a comprar ──
-                so = df['stock_objetivo']
-                sv = df['stock_virtual']
-                rp = df['reserv_polifiltro']
-                bop = df ['bo_polifiltro']
+                so  = df['stock_objetivo']
+                sv  = df['stock_virtual']
+                rp  = df['reserv_polifiltro']
+                bop = df['bo_polifiltro']
 
-                # Caso A: todo México
-                qty_mex_a = (so - sv).clip(lower=0)
-                qty_poli_a = pd.Series(0.0, index=df.index)
+                # Caso A — todo México, nada en Polifiltro
+                qty_mex_a   = (so - sv).clip(lower=0)
+                qty_poli_a  = pd.Series(0.0, index=df.index)
 
-                # Caso B: 5/8 en México, resto en Poli
-                qty_mex_b  = (((5 * so) / 8) - sv).clip(lower=0)
-                qty_poli_b = (so - sv - qty_mex_b - rp - bop).clip(lower=0)
+                # Caso B1 — proporción 5x3: 5/8 meses en México, 3/8 en Polifiltro
+                qty_mex_b1  = (((5 * so) / 8) - sv).clip(lower=0)
+                qty_poli_b1 = (so - sv - qty_mex_b1 - rp - bop).clip(lower=0)
 
-                # Caso C: 4/7 en México, resto en Poli
-                qty_mex_c  = (((4 * so) / 7) - sv).clip(lower=0)
-                qty_poli_c = (so - sv - qty_mex_c - rp - bop).clip(lower=0)
+                # Caso B2 — proporción 4x3: 4/7 meses en México, 3/7 en Polifiltro
+                qty_mex_b2  = (((4 * so) / 7) - sv).clip(lower=0)
+                qty_poli_b2 = (so - sv - qty_mex_b2 - rp - bop).clip(lower=0)
 
-                df['qty_comprar_mexico'] = np.where(cond_a, qty_mex_a,
-                                            np.where(cond_b, qty_mex_b, qty_mex_c))
-                df['qty_comprar_polifiltro'] = np.where(cond_a, qty_poli_a,
-                                               np.where(cond_b, qty_poli_b, qty_poli_c))
+                # Caso C1 — proporción 6x2: 6/8 meses en México, 2/8 en Polifiltro
+                qty_mex_c1  = (((6 * so) / 8) - sv).clip(lower=0)
+                qty_poli_c1 = (so - sv - qty_mex_c1 - rp - bop).clip(lower=0)
+
+                # Caso C2 — proporción 5x2: 5/7 meses en México, 2/7 en Polifiltro
+                qty_mex_c2  = (((5 * so) / 7) - sv).clip(lower=0)
+                qty_poli_c2 = (so - sv - qty_mex_c2 - rp - bop).clip(lower=0)
+
+                df['qty_comprar_mexico'] = np.select(
+                    [cond_a,      cond_b1,      cond_b2,      cond_c1,      cond_c2],
+                    [qty_mex_a,   qty_mex_b1,   qty_mex_b2,   qty_mex_c1,   qty_mex_c2],
+                    default=qty_mex_a
+                )
+                df['qty_comprar_polifiltro'] = np.select(
+                    [cond_a,      cond_b1,       cond_b2,       cond_c1,       cond_c2],
+                    [qty_poli_a,  qty_poli_b1,   qty_poli_b2,   qty_poli_c1,   qty_poli_c2],
+                    default=qty_poli_a
+                )
 
                 # ── 9. Redondeo al tamaño de caja (ceiling al múltiplo de qty_piezas_por_caja) ──
                 # Si qty_piezas_por_caja <= 0 o es NaN, se trata como caja de 1 (sin efecto).
@@ -969,7 +1013,14 @@ with tab_proceso:
 
         # Distribución por caso
         caso_counts = df_res['caso'].value_counts()
-        st.markdown(f"**Distribución por caso:** A={caso_counts.get('A',0)} · B={caso_counts.get('B',0)} · C={caso_counts.get('C',0)}")
+        st.markdown(
+            f"**Distribución por caso:** "
+            f"A={caso_counts.get('A',0)} · "
+            f"B1={caso_counts.get('B1',0)} · "
+            f"B2={caso_counts.get('B2',0)} · "
+            f"C1={caso_counts.get('C1',0)} · "
+            f"C2={caso_counts.get('C2',0)}"
+        )
 
         with st.expander("📊 Ver tabla completa de resultados"):
             st.dataframe(df_res, use_container_width=True)
